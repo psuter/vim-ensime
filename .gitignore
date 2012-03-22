@@ -1,0 +1,6 @@
+*.pyc
+*.swp
+*.ensime
+
+sbtproj/project
+sbtproj/target
