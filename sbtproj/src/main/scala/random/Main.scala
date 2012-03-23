@@ -2,8 +2,7 @@ package random
 
 object Main {
   def main(args : Array[String]) : Unit = {
-    println(foo(args.size))
+    println(args.size)
   }
-
-  def foo(i : Int) = i + 1
+  def foo1(i : Int) = { i + 1 }
 }

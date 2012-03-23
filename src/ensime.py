@@ -7,11 +7,8 @@ import threading
 
 from swank import SwankParser
 
-ENSIMESERVER = "bin/server"
-ENSIMEWD     = "/home/psuter/software/ensime/current/"
-
 class EnsimeClient:
-    def __init__(self,printer=None):
+    def __init__(self,printer):
         self.ensimeproc = None
         self.ensimeport = None
         self.ensimeSock = None
@@ -19,18 +16,23 @@ class EnsimeClient:
         self.lock       = threading.Lock()
         self.poller     = None
         self.parser     = SwankParser()
-        self.DEVNULL    = open("/dev/null", "w")
+        self.DEVNULL    = None #open("/dev/null", "w")
         self.printer    = printer
+        self.started    = False
+        self.shutdown   = False
+        self.ENSIMESERVER = "bin/server"
+        self.ENSIMEWD     = os.getenv("ENSIMEHOME")
 
     class SocketPoller(threading.Thread):
         def __init__(self, enclosing):
+            self.enclosing  = enclosing
             self.ensimeSock = enclosing.ensimeSock
             self.parser     = enclosing.parser
             self.printer    = enclosing.printer
             threading.Thread.__init__(self)
 
         def run(self):
-            while True:
+            while not self.enclosing.shutdown:
                 readable = []
                 while readable == []:
                     # Should always be very fast...
@@ -40,17 +42,17 @@ class EnsimeClient:
                 while len(msgLen) < 6:
                     chunk = self.ensimeSock.recv(6-len(msgLen))
                     if chunk == "":
-                        raise RuntimeError("Socket connection to Ensime broken (read).")
+                        raise RuntimeError("socket connection broken (read)")
                     msgLen = msgLen + chunk
                 msgLen = int("0x" + msgLen, 16)
                 msg = ""
                 while len(msg) < msgLen:
                     chunk = self.ensimeSock.recv(msgLen-len(msg))
                     if chunk == "":
-                        raise RuntimeError("Socket connection to Ensime broken (read).")
+                        raise RuntimeError("socket connection broken (read)")
                     msg = msg + chunk
                 parsed = self.parser.parse(msg)
-                self.printer("From ensime %s: " % parsed)
+                self.printer.out("From ensime %s: " % parsed)
                 
                 
     def freshMsgID(self):
@@ -73,7 +75,7 @@ class EnsimeClient:
             return None
         path = os.path.abspath(cwd)
         if not os.path.isdir(path):
-            raise RuntimeError("%s is not a directory." % path)
+            raise RuntimeError("%s is not a directory" % path)
         if ".ensime" in os.listdir(path):
             return path
         parent = os.path.join(path, os.path.pardir)
@@ -83,12 +85,18 @@ class EnsimeClient:
             return None
     
     def connect(self,cwd):
+        if self.shutdown:
+            raise RuntimeError("cannot reconnect client once it has been disconnected")
+        if self.started:
+            raise RuntimeError("client already running")
+        if self.ENSIMEWD is None:
+            raise RuntimeError("environment variable ENSIMEHOME is not set")
         dotEnsimeDir = self.getDotEnsimeDirectory(cwd)
         if dotEnsimeDir is None:
-            raise RuntimeError("Could not find '.ensime' file in any parent directory.")
+            raise RuntimeError("could not find '.ensime' file in any parent directory")
         tfname = tempfile.NamedTemporaryFile(prefix="ensimeportinfo",delete=False).name
-        self.ensimeproc = subprocess.Popen([ ENSIMESERVER, tfname ], cwd=ENSIMEWD, stdin=None, stdout=self.DEVNULL, stderr=self.DEVNULL, shell=False, env=None)
-        print "Waiting for port info to be written..."
+        self.ensimeproc = subprocess.Popen([ self.ENSIMESERVER, tfname ], cwd=self.ENSIMEWD, stdin=None, stdout=self.DEVNULL, stderr=self.DEVNULL, shell=False, env=None)
+        self.printer.out("waiting for port number...")
         ok = False
         
         while not ok:
@@ -98,7 +106,8 @@ class EnsimeClient:
                 ok = True
                 self.ensimeport = int(line.strip())
             fh.close()
-        print "Ensime is communicating on port %d" % self.ensimeport
+        self.started = True
+        self.printer.out("port number is %d." % self.ensimeport)
         self.ensimeSock = socket.socket(
             socket.AF_INET, socket.SOCK_STREAM)
         self.ensimeSock.connect(("127.0.0.1", self.ensimeport))
@@ -107,6 +116,16 @@ class EnsimeClient:
         self.poller.start()
         self.swankSend("""(swank:init-project (:root-dir "%s"))""" % dotEnsimeDir)
         return
+
+    def disconnect(self):
+        # stops the polling thread
+        self.printer.out("disconnecting...")
+        self.shutdown = True
+        self.swankSend("(swank:shutdown-server)")
+        self.printer.out("disconnected")
+        if self.ensimeproc != None:
+            self.ensimeproc.kill()
+        self.ensimeport = None
 
     def swankSend(self, message):
         if self.ensimeSock != None:
@@ -129,15 +148,12 @@ class EnsimeClient:
         while totalSent < textLen:
             sent = self.ensimeSock.send(text[totalSent:])
             if sent == 0:
-                raise RuntimeError("Socket connection to Ensime broken (write).")
+                raise RuntimeError("socket connection broken (write)")
             totalSent += sent
         return
         
     def __del__(self):
-        self.swankSend("(swank:shutdown-server)")
-        if self.ensimeproc != None:
-            self.ensimeproc.kill()
-        self.ensimeport = None
+        self.disconnect()
         return
 
     def test(self):
@@ -151,8 +167,10 @@ def main():
         print "Creating and connecting..."
 
         class Printer:
-            def __call__(self,arg):
-                print arg
+            def out(self,arg):
+                print "OUT: %s" % arg
+            def err(self,arg):
+                print "ERR: %s" % arg
 
         pcb = Printer() 
         ec = EnsimeClient(pcb)
@@ -165,5 +183,3 @@ def main():
     except RuntimeError as msg:
         print "There was an error: %s" % msg
 
-if __name__ == "__main__":
-    pass#main()
